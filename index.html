@@ -5,6 +5,8 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>AI Indodax Market Analyzer - Real-time</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+    <!-- Tambahkan library Supabase -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js"></script>
     <style>
         :root {
             --primary: #2563eb;
@@ -204,6 +206,14 @@
             background-color: var(--danger);
         }
         
+        .status-db-connected {
+            background-color: var(--success);
+        }
+        
+        .status-db-disconnected {
+            background-color: var(--danger);
+        }
+        
         .data-counter {
             font-weight: bold;
             color: var(--primary);
@@ -286,6 +296,16 @@
             font-size: 0.9rem;
         }
         
+        .db-status {
+            margin-top: 1rem;
+            padding: 0.5rem;
+            border-radius: 6px;
+            background-color: #f1f5f9;
+            display: flex;
+            align-items: center;
+            gap: 8px;
+        }
+        
         @media (max-width: 768px) {
             .grid {
                 grid-template-columns: 1fr;
@@ -364,6 +384,14 @@
                     <input type="number" id="history" value="12" min="1" max="48">
                 </div>
                 
+                <div class="form-group">
+                    <label for="autoStart">Mode Otomatis</label>
+                    <select id="autoStart">
+                        <option value="true">Aktif (Online Terus)</option>
+                        <option value="false">Manual</option>
+                    </select>
+                </div>
+                
                 <button id="startBtn" class="btn-success">
                     <i class="fas fa-play"></i> Mulai Koleksi Data
                 </button>
@@ -387,6 +415,11 @@
                     </div>
                 </div>
                 
+                <div class="db-status">
+                    <span class="status-indicator status-db-disconnected" id="dbStatusIndicator"></span>
+                    <span id="dbStatusText">Database: Terputus</span>
+                </div>
+                
                 <div class="form-group">
                     <label>Progress Koleksi Data</label>
                     <div class="progress-bar">
@@ -400,6 +433,7 @@
                     <div>Tick Data: <span id="tickDataCount">0</span> records</div>
                     <div>Candlestick Data: <span id="candleDataCount">0</span> records</div>
                     <div>Label Data: <span id="labelDataCount">0</span> records</div>
+                    <div>Data Tersimpan di DB: <span id="dbDataCount">0</span> records</div>
                 </div>
                 
                 <button id="exportBtn" class="btn-warning">
@@ -517,6 +551,13 @@
         let collectionInterval = null;
         let currentPair = 'btc_idr';
         let lastCandleTimestamp = null;
+        let supabase = null;
+        let dbConnected = false;
+        let dbRecordCount = 0;
+        
+        // Konfigurasi Supabase (ganti dengan URL dan Key Anda)
+        const SUPABASE_URL = 'https://edbcyydzeknneqtbmtxv.supabase.co';
+        const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImVkYmN5eWR6ZWtubmVxdGJtdHh2Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NTY5ODg5OTQsImV4cCI6MjA3MjU2NDk5NH0.M6VkiDL3Fz2APQRxi9NMArisfAZitNgLQBgSXZNxu4I';
         
         // Elemen DOM
         const startBtn = document.getElementById('startBtn');
@@ -524,16 +565,20 @@
         const exportBtn = document.getElementById('exportBtn');
         const statusIndicator = document.getElementById('statusIndicator');
         const statusText = document.getElementById('statusText');
+        const dbStatusIndicator = document.getElementById('dbStatusIndicator');
+        const dbStatusText = document.getElementById('dbStatusText');
         const tickCountElement = document.getElementById('tickCount');
         const dataProgress = document.getElementById('dataProgress');
         const progressText = document.getElementById('progressText');
         const tickDataCount = document.getElementById('tickDataCount');
         const candleDataCount = document.getElementById('candleDataCount');
         const labelDataCount = document.getElementById('labelDataCount');
+        const dbDataCount = document.getElementById('dbDataCount');
         const currentPriceElement = document.getElementById('currentPrice');
         const priceChangeElement = document.getElementById('priceChange');
         const notification = document.getElementById('notification');
         const notificationText = document.getElementById('notificationText');
+        const autoStartSelect = document.getElementById('autoStart');
         
         // Inisialisasi chart
         const ctx = document.getElementById('priceChart').getContext('2d');
@@ -563,6 +608,20 @@
             }, 3000);
         }
         
+        // Fungsi untuk mengupdate status koneksi database
+        function updateDbStatus(connected) {
+            dbConnected = connected;
+            if (connected) {
+                dbStatusIndicator.classList.remove('status-db-disconnected');
+                dbStatusIndicator.classList.add('status-db-connected');
+                dbStatusText.textContent = 'Database: Terhubung';
+            } else {
+                dbStatusIndicator.classList.remove('status-db-connected');
+                dbStatusIndicator.classList.add('status-db-disconnected');
+                dbStatusText.textContent = 'Database: Terputus';
+            }
+        }
+        
         // Fungsi untuk mengupdate status koleksi data
         function updateDataStatus(active) {
             dataCollectionActive = active;
@@ -578,6 +637,60 @@
                 statusText.textContent = 'Tidak aktif';
                 startBtn.disabled = false;
                 stopBtn.disabled = true;
+            }
+        }
+        
+        // Inisialisasi koneksi Supabase
+        async function initSupabase() {
+            try {
+                supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+                
+                // Test koneksi dengan query sederhana
+                const { data, error } = await supabase
+                    .from('market_data')
+                    .select('count', { count: 'exact', head: true });
+                
+                if (error) {
+                    console.error('Error connecting to Supabase:', error);
+                    updateDbStatus(false);
+                    showNotification('Gagal terhubung ke database', true);
+                    return false;
+                }
+                
+                updateDbStatus(true);
+                showNotification('Berhasil terhubung ke database');
+                return true;
+            } catch (error) {
+                console.error('Error initializing Supabase:', error);
+                updateDbStatus(false);
+                showNotification('Gagal menginisialisasi database', true);
+                return false;
+            }
+        }
+        
+        // Fungsi untuk menyimpan data ke Supabase
+        async function saveToDatabase(table, data) {
+            if (!supabase || !dbConnected) {
+                console.warn('Database not connected, skipping save');
+                return false;
+            }
+            
+            try {
+                const { error } = await supabase
+                    .from(table)
+                    .insert(data);
+                
+                if (error) {
+                    console.error(`Error saving to ${table}:`, error);
+                    return false;
+                }
+                
+                dbRecordCount++;
+                dbDataCount.textContent = dbRecordCount;
+                return true;
+            } catch (error) {
+                console.error(`Error saving to ${table}:`, error);
+                return false;
             }
         }
         
@@ -735,15 +848,23 @@
             // Jika ini candle baru, buat candlestick baru
             if (!lastCandleTimestamp || currentCandleTime.getTime() !== lastCandleTimestamp.getTime()) {
                 // Buat candlestick baru
-                candleData.push({
+                const newCandle = {
                     timeframe,
                     timestamp: currentCandleTime,
                     open: currentPrice,
                     high: currentPrice,
                     low: currentPrice,
                     close: currentPrice,
-                    volume: 0
-                });
+                    volume: 0,
+                    pair: currentPair
+                };
+                
+                candleData.push(newCandle);
+                
+                // Simpan ke database
+                if (dbConnected) {
+                    await saveToDatabase('candlesticks', newCandle);
+                }
                 
                 lastCandleTimestamp = currentCandleTime;
                 candleDataCount.textContent = candleData.length;
@@ -755,6 +876,11 @@
                 lastCandle.close = currentPrice;
                 // Volume disimulasikan karena tidak tersedia di API ticker
                 lastCandle.volume += Math.random() * 10;
+                
+                // Update di database
+                if (dbConnected) {
+                    await saveToDatabase('candlesticks', lastCandle);
+                }
             }
             
             // Update tabel setiap 10 tick
@@ -765,20 +891,39 @@
                 const futurePrice = currentPrice * (Math.random() > 0.5 ? 1.02 : 0.98);
                 const change = ((futurePrice - currentPrice) / currentPrice) * 100;
                 
-                labelData.push({
+                const newLabel = {
                     timestamp: now,
                     currentPrice: currentPrice,
                     futurePrice,
                     timeInterval: '15 menit',
                     change,
-                    label: change >= 0 ? 'Naik' : 'Turun'
-                });
+                    label: change >= 0 ? 'Naik' : 'Turun',
+                    pair: currentPair
+                };
+                
+                labelData.push(newLabel);
+                
+                // Simpan ke database
+                if (dbConnected) {
+                    await saveToDatabase('labels', newLabel);
+                }
                 
                 labelDataCount.textContent = labelData.length;
                 updateLabelTable();
                 
                 // Update chart
                 updatePriceChart();
+            }
+            
+            // Simpan data tick ke database setiap 5 tick
+            if (tickCount % 5 === 0 && dbConnected) {
+                const tickData = {
+                    timestamp: now,
+                    price: currentPrice,
+                    pair: currentPair
+                };
+                
+                await saveToDatabase('ticks', tickData);
             }
         }
         
@@ -862,7 +1007,7 @@
                             label: 'Harga Penutupan',
                             data: closes,
                             borderColor: '#2563eb',
-                            backgroundColor: 'rgza(37, 99, 235, 0.1)',
+                            backgroundColor: 'rgba(37, 99, 235, 0.1)',
                             borderWidth: 2,
                             fill: true,
                             tension: 0.3
@@ -945,24 +1090,38 @@
                 return;
             }
             
-            // Simulasi ekspor data
+            // Gabungkan data untuk diekspor
             const exportData = {
-                tickCount: tickCount,
-                candleData: candleData,
-                labelData: labelData,
-                pair: currentPair,
-                exportedAt: new Date().toISOString()
+                metadata: {
+                    exportedAt: new Date().toISOString(),
+                    pair: currentPair,
+                    tickCount,
+                    candleCount: candleData.length,
+                    labelCount: labelData.length
+                },
+                candles: candleData,
+                labels: labelData
             };
             
+            // Buat blob untuk diunduh
             const dataStr = JSON.stringify(exportData, null, 2);
-            const dataUri = 'data:application/json;charset=utf-8,'+ encodeURIComponent(dataStr);
+            const dataBlob = new Blob([dataStr], { type: 'application/json' });
             
-            const exportFileDefaultName = `indodax_data_${currentPair}_${new Date().toISOString().slice(0,10)}.json`;
+            // Buat URL untuk blob
+            const url = URL.createObjectURL(dataBlob);
             
-            const linkElement = document.createElement('a');
-            linkElement.setAttribute('href', dataUri);
-            linkElement.setAttribute('download', exportFileDefaultName);
-            linkElement.click();
+            // Buat elemen anchor untuk unduh
+            const downloadLink = document.createElement('a');
+            downloadLink.href = url;
+            downloadLink.download = `indodax_data_${currentPair}_${new Date().toISOString().slice(0, 10)}.json`;
+            
+            // Klik link untuk memulai unduhan
+            document.body.appendChild(downloadLink);
+            downloadLink.click();
+            document.body.removeChild(downloadLink);
+            
+            // Bersihkan URL
+            setTimeout(() => URL.revokeObjectURL(url), 100);
             
             showNotification('Data berhasil diekspor');
         }
@@ -972,27 +1131,19 @@
         stopBtn.addEventListener('click', stopDataCollection);
         exportBtn.addEventListener('click', exportData);
         
-        // Inisialisasi
-        updateDataStatus(false);
-        stopBtn.disabled = true;
-        
-        // Load initial data
-        fetchIndodaxData().then(data => {
-            if (data) {
-                const lastPrice = parseFloat(data.ticker.last);
-                currentPrice = lastPrice;
-                previousPrice = lastPrice;
-                currentPriceElement.textContent = formatRupiah(lastPrice);
-                priceChangeElement.textContent = '0% (Rp 0)';
+        // Inisialisasi aplikasi
+        document.addEventListener('DOMContentLoaded', async function() {
+            // Update status awal
+            updateDataStatus(false);
+            
+            // Coba koneksi ke database
+            await initSupabase();
+            
+            // Jika mode otomatis aktif, langsung mulai koleksi data
+            if (autoStartSelect.value === 'true') {
+                startDataCollection();
             }
         });
-        
-        // Tampilkan data awal
-        updateCandleTable();
-        updateLabelTable();
-        updatePriceChart();
-        candleDataCount.textContent = candleData.length;
-        labelDataCount.textContent = labelData.length;
     </script>
 </body>
 </html>
